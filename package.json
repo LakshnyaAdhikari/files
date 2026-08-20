@@ -4,12 +4,16 @@
   "type": "module",
   "main": "agent.js",
   "scripts": {
-    "seed": "node db/seed.js",
-    "start": "node agent.js"
+    "seed": "node seed.js",
+    "start": "node agent.js",
+    "test:mcp": "node test-mcp-server.js"
+  },
+  "engines": {
+    "node": ">=20"
   },
   "dependencies": {
-    "@armoriq/sdk": "latest",
-    "@modelcontextprotocol/sdk": "latest",
+    "@armoriq/sdk": "0.6.7",
+    "@modelcontextprotocol/sdk": "1.30.0",
     "better-sqlite3": "^11.3.0",
     "dotenv": "^16.4.5",
     "stripe": "^16.0.0"

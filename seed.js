@@ -4,7 +4,7 @@
 // refund that should hold, and a "poisoned" ticket that tries to get
 // the agent to refund the WRONG order (the plan-conformance demo).
 //
-// Run: node db/seed.js
+// Run: node seed.js
 // Requires STRIPE_SECRET_KEY in .env (test mode) to create real test
 // charges, since refunding something that was never charged proves nothing.
 
@@ -35,7 +35,7 @@ db.exec(`
     amount REAL,
     item TEXT,
     order_date TEXT,
-    stripe_charge_id TEXT,
+    stripe_payment_intent_id TEXT,
     FOREIGN KEY (customer_id) REFERENCES customers(id)
   );
 
@@ -58,6 +58,9 @@ async function createTestCharge(amountUsd) {
     confirm: true,
     automatic_payment_methods: { enabled: true, allow_redirects: 'never' },
   });
+  if (pi.status !== 'succeeded') {
+    throw new Error(`Charge for $${amountUsd} did not succeed: ${pi.status}`);
+  }
   return pi.id;
 }
 

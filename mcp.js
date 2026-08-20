@@ -1,4 +1,3 @@
-// src/mcp.js
 // Owns the connection to the refund-desk MCP server, spawned locally
 // over stdio -- same shape as the reference GitHub agent's mcp.js.
 
@@ -15,13 +14,29 @@ export async function connectRefundMcp() {
     command: 'node',
     args: ['refund-mcp-server.js'],
     env: { ...process.env },
+    cwd: process.cwd(),
+    stderr: 'pipe',
   });
 
   mcpClient = new Client(
     { name: 'armoriq-refund-agent', version: '1.0.0' },
     { capabilities: {} }
   );
-  await mcpClient.connect(mcpTransport);
+  mcpTransport.stderr?.on('data', (chunk) => process.stderr.write(`[refund-mcp] ${chunk}`));
+  const timeoutMs = 10_000;
+  let timeout;
+  try {
+    await Promise.race([
+      mcpClient.connect(mcpTransport),
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(
+          new Error(`Timed out connecting to refund MCP server after ${timeoutMs}ms.`)
+        ), timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
   return mcpClient;
 }
 

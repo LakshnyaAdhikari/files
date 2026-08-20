@@ -1,5 +1,3 @@
-// src/policy.js
-//
 // This is the "dynamic, not hardcoded" piece. There is no flat
 // `if (amount > 500)` anywhere in this codebase. The routing threshold
 // is computed per-customer from real signal, and the LLM never sees
@@ -28,7 +26,9 @@ export function computeCeiling(customer) {
   if (!customer || customer.total_orders < 2) {
     return NEW_CUSTOMER_CEILING;
   }
-  return customer.avg_order_value * MULTIPLIER;
+  const avg = Number(customer.avg_order_value);
+  if (!Number.isFinite(avg) || avg <= 0) return NEW_CUSTOMER_CEILING;
+  return avg * MULTIPLIER;
 }
 
 /**

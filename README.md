@@ -10,7 +10,7 @@ Stripe-backed refund domain.
    low-risk refund for an established customer -- allowed automatically.
 2. **Dynamic, code-computed threshold holds a large refund.**
    `ticket_2` is a first-time customer's $650 refund -- the ceiling is
-   computed per-customer in `src/policy.js` (never a hardcoded global
+   computed per-customer in `policy.js` (never a hardcoded global
    number, never something the LLM reasons about), routes to
    `apply_refund_elevated`, and should hold in the dashboard.
 3. **Order-binding plan-conformance.** `ticket_3` contains an embedded
@@ -22,8 +22,9 @@ Stripe-backed refund domain.
 ## Setup
 
 ```bash
-npm install
+npm ci
 cp .env.example .env   # fill in ARMORIQ_API_KEY, STRIPE_SECRET_KEY (test mode), GEMINI_API_KEY
+npm run test:mcp        # raw MCP protocol smoke test; no Stripe operation is made
 npm run seed            # creates db/refunds.db and 3 real Stripe test-mode charges
 ```
 
@@ -43,25 +44,19 @@ npm run seed            # creates db/refunds.db and 3 real Stripe test-mode char
 npm start
 ```
 
-Approve the held `ticket_2` refund from the dashboard, then re-run or
-extend the agent to poll/`await_approval` and confirm it resumes and
-completes the Stripe refund.
+Approve the held `ticket_2` refund from the dashboard. The running process
+polls ArmorIQ for that specific delegation, re-checks the signed plan, and
+then completes the Stripe refund without a second `npm start`.
 
-## Open questions to verify before demo day
+Use `npm ci` on every demo machine. Do not copy `node_modules`: the native
+`better-sqlite3` module must be installed for that machine's Node ABI.
 
-- **Does `session.check()` evaluate on `args` values (e.g. amount), or
-  only on tool/MCP name?** This build assumes name-based policy and
-  routes around it via two tool names (`apply_refund_standard` /
-  `apply_refund_elevated`) decided in code. If value-based rules exist,
-  that's a cleaner alternative -- test both.
-- **Does the SDK actually reject `ticket_3`'s order mismatch?** The
-  reference repo's session pattern is coarse (one call at a time).
-  Whether it holds a full multi-step plan hash the way `agent.js`
-  assumes (order_id pinned at capture time, re-checked at execute time)
-  needs to be run and watched, not assumed. If it doesn't reject it
-  out of the box, the fallback is to bind order_id into the plan's
-  step arguments explicitly at `startPlan()` time so the executed call
-  must match it exactly.
-- **`ArmorIQClient`, `bootstrap()`, `forUser().startSession()` method
-  names** are taken directly from the reference repo -- confirm no
-  version drift against your installed `@armoriq/sdk` version.
+## Demo verification
+
+- **Verify `ticket_3` in the configured ArmorIQ organization.** Its initial
+  LLM-directed lookup must be blocked or held because the captured plan binds
+  the intake order (`order_C1`) while the poisoned lookup attempts `order_C2`.
+  This requires the dashboard MCP registration and policy to be active.
+- **Verify the approval window.** Leave ticket 2 pending for several minutes,
+  approve it in the dashboard, and confirm the original `npm start` process
+  retries its signed-plan check and creates exactly one Stripe refund.
