@@ -1,0 +1,17 @@
+{
+  "name": "armoriq-refund-agent",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "agent.js",
+  "scripts": {
+    "seed": "node db/seed.js",
+    "start": "node agent.js"
+  },
+  "dependencies": {
+    "@armoriq/sdk": "latest",
+    "@modelcontextprotocol/sdk": "latest",
+    "better-sqlite3": "^11.3.0",
+    "dotenv": "^16.4.5",
+    "stripe": "^16.0.0"
+  }
+}
