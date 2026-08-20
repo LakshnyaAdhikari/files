@@ -6,7 +6,7 @@ const REFUND_MCP_TOOLS = [
   { name: 'check_payment_history', description: 'Fetch customer risk profile (args: { customer_id })' },
 ];
 
-const GEMINI_MODEL = 'gemini-2.5-flash';
+const GEMINI_MODEL = 'gemini-3.6-flash';
 
 function extractJsonArray(text) {
   const trimmed = text.trim();

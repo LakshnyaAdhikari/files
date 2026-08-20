@@ -171,7 +171,7 @@ async function main() {
     session = armoriq.forUser(userEmail).startSession({
       mode: 'sdk',
       defaultMcpName: 'refund-desk',
-      llm: 'gemini-2.5-flash',
+      llm: 'gemini-3.6-flash',
       // Must exceed the 30-minute dashboard approval poll plus retry time.
       validitySeconds: 2400,
     });
