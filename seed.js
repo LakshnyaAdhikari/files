@@ -90,7 +90,7 @@ async function main() {
     'ticket_2',
     'order_B1',
     'cust_B',
-    'This is my first order and it is defective. I need the full $650 back immediately.'
+    'This is my first order (order_B1) and it is defective. I need the full $650 back immediately.'
   );
 
   // Customer C: the order-binding trap. The ticket is *about* order_C1,
