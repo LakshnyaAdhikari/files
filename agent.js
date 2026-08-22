@@ -123,6 +123,7 @@ async function checkWithApproval(session, call, approverContext, originalPlanCap
   
   if (outcome !== 'approved') {
     console.log(`  Approval ${outcome}; refund was not executed.`);
+    decision.outcome = outcome;
     return decision;
   }
 
@@ -195,12 +196,28 @@ async function processTicket(session, ticket) {
 
   // IMPORTANT: this remains the LLM-driven lookup result, not ticket.order_id.
   // Any poisoned order id therefore reaches ArmorIQ's signed-plan check.
-  await runRefundStep(session, {
+  const res = await runRefundStep(session, {
     action,
     order_id: order.id,
     amount: order.amount,
     reasonForLog,
   }, ticket.originalPlanCapture);
+
+  // --- SAFE EXIT / FALLBACK MESSAGING ---
+  if (!res.decision) return; // Errored out before decision
+
+  if (res.decision.allowed) {
+    console.log(`\n  💬 [Ticket Resolved] Message to customer: "Your refund of $${order.amount} has been successfully processed."`);
+  } else if (res.decision.action === 'block') {
+    console.log(`\n  🚨 [Security Escalation] System error: Intent mismatch detected. Automated resolution aborted and escalated to internal security team.`);
+  } else if (res.decision.action === 'hold') {
+    if (res.decision.outcome === 'rejected') {
+      console.log(`\n  💬 [Ticket Resolved] Message to customer: "Refund denied unfortunately. If you are not satisfied, please feel free to escalate to xyzcustomercare@gmail.com."`);
+    } else {
+      // outcome is likely 'timeout' or pending
+      console.log(`\n  💬 [Ticket Pending] Message to customer: "Your refund request requires further manual review. We will update you once a decision is made."`);
+    }
+  }
 }
 
 async function main() {
