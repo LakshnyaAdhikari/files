@@ -122,6 +122,10 @@ async function checkWithApproval(session, call, approverContext, originalPlanCap
     delegation_id: decision.delegationId,
   }, { status: 'failed', errorMessage: approverContext ?? decision.reason });
 
+  // IMPORTANT: Force-flush the trace to the backend BEFORE we hang on awaitApproval.
+  // Otherwise, the dashboard won't know we connected or generated a hold!
+  await session.flushObservability();
+
   if (holdOrBlock !== 'hold' || !decision.delegationId) return decision;
 
   // 4. HOLD / APPROVAL
@@ -248,11 +252,23 @@ async function main() {
     });
 
     const tickets = db.prepare('SELECT * FROM tickets').all();
-    for (const ticket of tickets) {
+    const TICKET_DELAY_MS = process.env.TICKET_DELAY_MS ? parseInt(process.env.TICKET_DELAY_MS, 10) : 60000;
+    
+    for (let i = 0; i < tickets.length; i++) {
+      const ticket = tickets[i];
+      console.log(`\n[QUEUE] Processing Ticket ${i + 1}/${tickets.length} (${ticket.id})...`);
+      
       try {
         await processTicket(session, ticket);
+        console.log(`[QUEUE] ${ticket.id} completed.`);
       } catch (error) {
-        console.error(`Ticket ${ticket.id} failed:`, error);
+        console.error(`[QUEUE] ${ticket.id} failed:`, error);
+      }
+
+      if (i < tickets.length - 1) {
+        // Ticket pacing: Wait before processing the next ticket to avoid Gemini free-tier limits
+        console.log(`[QUEUE] Waiting ${TICKET_DELAY_MS / 1000}s before processing next ticket to respect Gemini rate limits...`);
+        await new Promise(resolve => setTimeout(resolve, TICKET_DELAY_MS));
       }
     }
   } finally {

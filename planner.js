@@ -21,7 +21,7 @@ function extractJsonArray(text) {
   return JSON.parse(candidate.slice(start, end + 1));
 }
 
-async function planWithGemini(goal, geminiApiKey) {
+async function planWithGemini(goal, geminiApiKey, retries = 3) {
   const prompt = `Convert this goal into a refund-desk MCP tool call.
 Available tools: ${JSON.stringify(REFUND_MCP_TOOLS)}
 Goal: "${goal}"
@@ -29,30 +29,47 @@ Return ONLY a JSON array like [{ "name": "tool_name", "args": {} }]. No markdown
 
   if (!geminiApiKey) throw new Error('GEMINI_API_KEY is required to plan tool calls.');
 
-  try {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${geminiApiKey}`;
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      throw new Error(`Gemini request failed (${response.status}): ${data.error?.message ?? response.statusText}`);
-    }
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${geminiApiKey}`;
 
-    const raw = data.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (typeof raw !== 'string' || !raw.trim()) {
-      throw new Error('Gemini returned no tool-call content.');
-    }
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
+      });
+      const data = await response.json().catch(() => ({}));
+      
+      if (!response.ok) {
+        if (response.status === 429) {
+          if (attempt === retries) throw new Error(`Gemini request failed (429): Quota exceeded.`);
+          // Backoff dynamically or use a fixed 30s fallback
+          const delayMs = attempt * 30000;
+          console.log(`\n  [PLANNER] ⚠️ Gemini rate limit (429) hit. Retrying attempt ${attempt + 1}/${retries} in ${delayMs / 1000}s...`);
+          await new Promise(r => setTimeout(r, delayMs));
+          continue;
+        }
+        throw new Error(`Gemini request failed (${response.status}): ${data.error?.message ?? response.statusText}`);
+      }
 
-    const parsed = extractJsonArray(raw);
-    if (!Array.isArray(parsed) || parsed.length === 0) {
-      throw new Error('Gemini returned an empty tool-call plan.');
+      const raw = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (typeof raw !== 'string' || !raw.trim()) {
+        throw new Error('Gemini returned no tool-call content.');
+      }
+
+      const parsed = extractJsonArray(raw);
+      if (!Array.isArray(parsed) || parsed.length === 0) {
+        throw new Error('Gemini returned an empty tool-call plan.');
+      }
+      return parsed;
+    } catch (error) {
+      if (attempt === retries) {
+        throw new Error(`Unable to plan refund-desk tool call: ${error.message}`);
+      }
+      // Only 429s are caught by the loop's continue; other network errors will bubble up here
+      // We could retry network errors too, but for now we throw unless it's a handled 429.
+      throw new Error(`Unable to plan refund-desk tool call: ${error.message}`);
     }
-    return parsed;
-  } catch (error) {
-    throw new Error(`Unable to plan refund-desk tool call: ${error.message}`);
   }
 }
 
