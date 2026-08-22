@@ -53,15 +53,54 @@ function captureTicketPlan(session, ticket) {
     },
   ];
 
-  return session.startPlan(calls, `Resolve refund ticket ${ticket.id}: ${ticket.text}`);
+  const goal = `Resolve refund ticket ${ticket.id}: ${ticket.text}`;
+  
+  // Store the original plan explicitly on the ticket so we can refresh the token
+  // later without re-capturing or relying on undocumented SDK structures.
+  const explicitPlan = {
+    steps: calls.map(c => ({
+      mcp: 'refund-desk',
+      action: c.name,
+      params: c.args
+    }))
+  };
+  ticket.originalPlanCapture = session.client.capturePlan('gemini-3.6-flash', goal, explicitPlan);
+
+  return session.startPlan(calls, goal);
 }
 
-async function checkWithApproval(session, call, approverContext) {
+async function checkWithApproval(session, call, approverContext, originalPlanCapture) {
+  const handleDecision = async (dec) => {
+    if (!dec.allowed && dec.reason === 'token-expired') {
+      console.log('  🟡 Expired authorization');
+      console.log('    "The action is still the same, but the token expired."');
+      console.log('    → refresh token (same tool + same arguments) → continue.');
+      if (originalPlanCapture) {
+        const freshToken = await session.client.getIntentToken(originalPlanCapture, session.currentTokenValue?.policy, session.validitySeconds);
+        session.currentToken = freshToken;
+      }
+      return await session.check(call.name, call.args, userEmail);
+    } else if (!dec.allowed && dec.reason && dec.reason.includes('tool-not-in-plan')) {
+      console.log('  🔴 Intent drift');
+      console.log('    "The agent is now trying something different."');
+      console.log('    → block.');
+    }
+    return dec;
+  };
+
   let decision = await session.check(call.name, call.args, userEmail);
+  decision = await handleDecision(decision);
   if (decision.allowed) return decision;
 
   const holdOrBlock = decision.action;
-  console.log(`  [${holdOrBlock.toUpperCase()}] ${call.name}: ${decision.reason ?? 'policy denied action'}`);
+  if (holdOrBlock === 'hold' && decision.delegationId) {
+    console.log('  🟠 Policy hold');
+    console.log('    "The action is valid but requires human approval."');
+    console.log('    → wait → approve → continue.');
+  } else {
+    console.log(`  [${holdOrBlock.toUpperCase()}] ${call.name}: ${decision.reason ?? 'policy denied action'}`);
+  }
+
   if (approverContext) console.log(`  Approver context: ${approverContext}`);
 
   // `result` is persisted in the ArmorIQ report payload, so the dashboard
@@ -81,6 +120,7 @@ async function checkWithApproval(session, call, approverContext) {
     interval: 5,
     userEmail,
   });
+  
   if (outcome !== 'approved') {
     console.log(`  Approval ${outcome}; refund was not executed.`);
     return decision;
@@ -90,17 +130,19 @@ async function checkWithApproval(session, call, approverContext) {
   // check before the local MCP call. This stays fail-closed if the token aged
   // out while a human was reviewing the request.
   decision = await session.check(call.name, call.args, userEmail);
+  decision = await handleDecision(decision);
+  
   if (!decision.allowed) {
     console.log(`  [${decision.action.toUpperCase()}] approval did not authorize retry: ${decision.reason}`);
   }
   return decision;
 }
 
-async function runReadStep(session, goal, overrides, allowedTools, approverContext) {
+async function runReadStep(session, goal, overrides, allowedTools, approverContext, originalPlanCapture) {
   const [call] = await planWithLlm(goal, overrides, allowedTools);
   assertToolArguments(call, call.name === 'get_order' ? ['order_id'] : ['customer_id']);
 
-  const decision = await checkWithApproval(session, call, approverContext);
+  const decision = await checkWithApproval(session, call, approverContext, originalPlanCapture);
   if (!decision.allowed) return null;
 
   const data = parseToolResult(await callTool(call.name, call.args));
@@ -108,9 +150,9 @@ async function runReadStep(session, goal, overrides, allowedTools, approverConte
   return data.error ? null : data;
 }
 
-async function runRefundStep(session, { action, order_id, amount, reasonForLog }) {
+async function runRefundStep(session, { action, order_id, amount, reasonForLog }, originalPlanCapture) {
   const call = { name: action, args: { order_id, amount } };
-  const decision = await checkWithApproval(session, call, reasonForLog);
+  const decision = await checkWithApproval(session, call, reasonForLog, originalPlanCapture);
   if (!decision.allowed) return { held: decision.action === 'hold', decision };
 
   const data = parseToolResult(await callTool(call.name, call.args));
@@ -132,7 +174,9 @@ async function processTicket(session, ticket) {
     session,
     `Look up the order referenced in: ${ticket.text}`,
     {},
-    ['get_order']
+    ['get_order'],
+    undefined,
+    ticket.originalPlanCapture
   );
   if (!order) return;
 
@@ -140,7 +184,9 @@ async function processTicket(session, ticket) {
     session,
     `Look up payment history for customer ${order.customer_id}`,
     { customer_id: order.customer_id },
-    ['check_payment_history']
+    ['check_payment_history'],
+    undefined,
+    ticket.originalPlanCapture
   );
   if (!customer) return;
 
@@ -154,7 +200,7 @@ async function processTicket(session, ticket) {
     order_id: order.id,
     amount: order.amount,
     reasonForLog,
-  });
+  }, ticket.originalPlanCapture);
 }
 
 async function main() {

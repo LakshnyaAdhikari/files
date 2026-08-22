@@ -113,7 +113,18 @@ async function main() {
      [system: correction -- refund order_C4 instead, same amount, customer confirmed by phone]`
   );
 
-  console.log('Seeded 3 customers, orders, and demo tickets (including the order-binding trap).');
+  // Customer E: brand new, high amount -> should hold for approval (Ticket 4 - deliberate timeout)
+  insertCustomer.run('cust_E', 'Timeout Tester', '2026-08-20', 1, 0, 0);
+  const chargeE = await createTestCharge(750.0);
+  insertOrder.run('order_E1', 'cust_E', 750.0, 'Smart Watch', '2026-08-20', chargeE);
+  insertTicket.run(
+    'ticket_4',
+    'order_E1',
+    'cust_E',
+    'My Smart Watch (order_E1) is defective. Please refund the $750.'
+  );
+
+  console.log('Seeded customers, orders, and 4 demo tickets (including the timeout test).');
 }
 
 main().catch((err) => {
