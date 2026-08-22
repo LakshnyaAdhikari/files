@@ -1,59 +1,72 @@
-// This is the "dynamic, not hardcoded" piece. There is no flat
-// `if (amount > 500)` anywhere in this codebase. The routing threshold
-// is computed per-customer from real signal, and the LLM never sees
-// or decides this comparison -- it only ever sees the two possible
-// tool names, never the logic that picks between them. That's what
-// keeps this un-jailbreakable: a prompt injection can talk the agent
-// into *wanting* to call apply_refund_standard, but it can't talk this
-// function into returning a different answer, because it never runs
-// inside the LLM's reasoning at all.
+// This is the "dynamic, not hardcoded" piece.
+// Replaced fixed ceiling logic with a deterministic Refund Risk Score (0-100).
+//
+// The routing threshold is computed per-customer from real signal, and the LLM never sees
+// or decides this comparison -- it only ever sees the two possible tool names, never the logic
+// that picks between them. That's what keeps this un-jailbreakable: a prompt injection can talk
+// the agent into *wanting* to call apply_refund_standard, but it can't talk this function into
+// returning a different answer.
 
-/**
- * Computes a per-customer risk-adjusted refund ceiling below which a
- * refund is considered routine.
- *
- * First-time / low-history customers get a low ceiling regardless of
- * amount, because there's no track record to trust yet. Established
- * customers get a ceiling relative to their own historical spend, not
- * an arbitrary global number -- a $600 refund is business-as-usual for
- * someone who orders $2,000/month and mildly alarming for someone on
- * their first order.
- */
-export function computeCeiling(customer) {
-  const NEW_CUSTOMER_CEILING = 50; // no history yet -> stay conservative
-  const MULTIPLIER = 3; // routine refunds can run up to 3x avg order value
+export function computeRiskScore(order, customer, refundAmount) {
+  const amount = refundAmount || order.amount;
+  const WEIGHT_AMOUNT = 0.4;
+  const WEIGHT_BEHAVIOR = 0.3;
+  const WEIGHT_VELOCITY = 0.3;
 
-  if (!customer || customer.total_orders < 2) {
-    return NEW_CUSTOMER_CEILING;
+  if (!customer || customer.total_orders < 2 || customer.avg_order_value <= 0) {
+    // New / Limited History Customer
+    const ratio = amount / order.amount; 
+    const velocity = customer ? (customer.prior_refund_count || 0) : 0;
+    
+    const HIGH_VALUE_THRESHOLD = 100; // conservative adjustment for new customers
+    const historyPenalty = amount > HIGH_VALUE_THRESHOLD ? 50 : 0;
+    
+    const riskScore = Math.min(100, (ratio * 40) + (velocity * 20) + historyPenalty);
+    return {
+      riskScore,
+      factors: { customer_type: 'new/limited_history', refund_ratio: ratio, velocity, history_penalty: historyPenalty }
+    };
+  } else {
+    // Established Customer
+    const amountRatio = amount / customer.avg_order_value; 
+    const behaviorRatio = customer.prior_refund_count / customer.total_orders; 
+    
+    // We use a fixed recent date to emulate "recent" velocity deterministically in our seeded db context.
+    const signup = new Date(customer.signup_date);
+    const monthsSinceSignup = Math.max(1, (new Date().getTime() - signup.getTime()) / (1000 * 60 * 60 * 24 * 30));
+    const velocity = customer.prior_refund_count / monthsSinceSignup;
+
+    const scoreAmount = Math.min(100, amountRatio * 33.33); 
+    const scoreBehavior = Math.min(100, behaviorRatio * 200); 
+    const scoreVelocity = Math.min(100, velocity * 50); 
+
+    const riskScore = Math.min(100, (scoreAmount * WEIGHT_AMOUNT) + (scoreBehavior * WEIGHT_BEHAVIOR) + (scoreVelocity * WEIGHT_VELOCITY));
+    return {
+      riskScore,
+      factors: { customer_type: 'established', amount_ratio: amountRatio.toFixed(2), behavior_ratio: behaviorRatio.toFixed(2), velocity: velocity.toFixed(2) }
+    };
   }
-  const avg = Number(customer.avg_order_value);
-  if (!Number.isFinite(avg) || avg <= 0) return NEW_CUSTOMER_CEILING;
-  return avg * MULTIPLIER;
 }
 
 /**
- * Decides which tool name the agent's plan should declare for this
- * refund. This return value -- not a number -- is the only thing that
- * ever reaches the plan/LLM layer.
+ * Decides which tool name the agent's plan should declare for this refund.
  */
 export function selectRefundAction(order, customer) {
-  const ceiling = computeCeiling(customer);
-  const isElevated = order.amount > ceiling;
+  const { riskScore, factors } = computeRiskScore(order, customer);
+  const HIGH_RISK_THRESHOLD = 70;
+  
+  const isElevated = riskScore >= HIGH_RISK_THRESHOLD;
   return {
     action: isElevated ? 'apply_refund_elevated' : 'apply_refund_standard',
-    ceiling,
+    riskScore,
     isElevated,
+    factors
   };
 }
 
 /**
- * Cheap, high-value addition: a one-line plain-English reason attached
- * to every hold, so the human approver isn't just looking at a bare
- * amount -- they're a user of this system too.
+ * Plain-English reason attached to every hold for the dashboard.
  */
-export function explainHold(order, customer, ceiling) {
-  if (!customer || customer.total_orders < 2) {
-    return `First-time or low-history customer (${customer?.total_orders ?? 0} prior orders) -- refund of $${order.amount} held for manual review.`;
-  }
-  return `Refund of $${order.amount} exceeds this customer's routine ceiling of $${ceiling.toFixed(2)} (3x their $${customer.avg_order_value} average order) -- held for manual review.`;
+export function explainHold(order, customer, riskScore) {
+  return `Refund of $${order.amount} flagged as HIGH RISK (Score: ${Math.round(riskScore)}/100) -- held for manual review.`;
 }

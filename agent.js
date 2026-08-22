@@ -191,8 +191,9 @@ async function processTicket(session, ticket) {
   );
   if (!customer) return;
 
-  const { action, ceiling, isElevated } = selectRefundAction(order, customer);
-  const reasonForLog = isElevated ? explainHold(order, customer, ceiling) : null;
+  const { action, riskScore, isElevated, factors } = selectRefundAction(order, customer);
+  console.log(`  [RISK ASSESSMENT] Score: ${Math.round(riskScore)}/100. Factors: ${JSON.stringify(factors)}`);
+  const reasonForLog = isElevated ? explainHold(order, customer, riskScore) : null;
 
   // IMPORTANT: this remains the LLM-driven lookup result, not ticket.order_id.
   // Any poisoned order id therefore reaches ArmorIQ's signed-plan check.
