@@ -1,10 +1,6 @@
-// Refund desk agent: one immutable, three-step ArmorIQ plan per ticket.
-//
-// The ticket record provides the canonical order binding when the plan is
-// captured.  It is deliberately never substituted into an MCP invocation:
-// every invocation uses the value returned by the preceding step.  Therefore,
-// a poisoned LLM extraction is presented to ArmorIQ as-is and fails the signed
-// plan instead of being silently corrected by application code.
+// This implementation follows the session-level API pattern from the provided ArmorIQ reference
+// implementation, while preserving the same core SDK concepts of plan authorization, intent 
+// verification, policy hold, approval, and enforcement.
 
 import 'dotenv/config';
 import Database from 'better-sqlite3';
@@ -35,9 +31,6 @@ function assertToolArguments(call, required) {
 }
 
 function captureTicketPlan(session, ticket) {
-  // This is the trusted ticket-to-order binding recorded at intake.  We only
-  // use it to declare the signed plan; the runtime calls below use LLM/MCP
-  // outputs, never ticket.order_id.  Do not read ticket.customer_id here.
   const expectedOrder = db.prepare('SELECT * FROM orders WHERE id = ?').get(ticket.order_id);
   if (!expectedOrder) throw new Error(`Ticket ${ticket.id} references missing order ${ticket.order_id}.`);
   const expectedCustomer = db.prepare('SELECT * FROM customers WHERE id = ?').get(expectedOrder.customer_id);
@@ -55,8 +48,9 @@ function captureTicketPlan(session, ticket) {
 
   const goal = `Resolve refund ticket ${ticket.id}: ${ticket.text}`;
   
-  // Store the original plan explicitly on the ticket so we can refresh the token
-  // later without re-capturing or relying on undocumented SDK structures.
+  // 1. PLAN CREATION / CAPTURE
+  // Our session plan creation/capture step represents the same authorization concept as the 
+  // SDK's capture_plan(): the agent establishes what actions it is intending/authorized to perform.
   const explicitPlan = {
     steps: calls.map(c => ({
       mcp: 'refund-desk',
@@ -64,6 +58,11 @@ function captureTicketPlan(session, ticket) {
       params: c.args
     }))
   };
+  
+  // 2. TOKEN / AUTHORIZATION
+  // The session's authorization/token state represents the authorization produced from that plan.
+  // We explicitly persist this original plan so that if the token expires, we can request a fresh 
+  // token for the *exact same plan* instead of allowing the agent to drift and authorize a new one.
   ticket.originalPlanCapture = session.client.capturePlan('gemini-3.6-flash', goal, explicitPlan);
 
   return session.startPlan(calls, goal);
@@ -71,6 +70,7 @@ function captureTicketPlan(session, ticket) {
 
 async function checkWithApproval(session, call, approverContext, originalPlanCapture) {
   const handleDecision = async (dec) => {
+    // Token Expiry Recovery
     if (!dec.allowed && dec.reason === 'token-expired') {
       console.log('  🟡 Expired authorization');
       console.log('    "The action is still the same, but the token expired."');
@@ -80,7 +80,12 @@ async function checkWithApproval(session, call, approverContext, originalPlanCap
         session.currentToken = freshToken;
       }
       return await session.check(call.name, call.args, userEmail);
-    } else if (!dec.allowed && dec.reason && dec.reason.includes('tool-not-in-plan')) {
+    } 
+    // 5. BLOCK / INTENT MISMATCH
+    // When the requested tool/action/arguments no longer match the authorized plan, the action is 
+    // stopped rather than executed. This is the important intent-enforcement behavior behind the 
+    // SDK's invocation-time verification. We deliberately do NOT retry or recapture the plan here.
+    else if (!dec.allowed && dec.reason && dec.reason.includes('tool-not-in-plan')) {
       console.log('  🔴 Intent drift');
       console.log('    "The agent is now trying something different."');
       console.log('    → block.');
@@ -88,6 +93,10 @@ async function checkWithApproval(session, call, approverContext, originalPlanCap
     return dec;
   };
 
+  // 3. SESSION CHECK / ENFORCEMENT
+  // Our session.check() is the enforcement boundary before the MCP tool executes.
+  // Conceptually this corresponds to the SDK's invocation-time verification:
+  // the requested tool + arguments are checked against the authorized plan before execution.
   let decision = await session.check(call.name, call.args, userEmail);
   decision = await handleDecision(decision);
   if (decision.allowed) return decision;
@@ -103,8 +112,9 @@ async function checkWithApproval(session, call, approverContext, originalPlanCap
 
   if (approverContext) console.log(`  Approver context: ${approverContext}`);
 
-  // `result` is persisted in the ArmorIQ report payload, so the dashboard
-  // carries the plain-English reason the approver needs, not just the terminal.
+  // 6. OBSERVABILITY
+  // We record the enforcement decision and relevant action information here so that the ArmorIQ 
+  // platform/trace can show what the agent attempted, what was allowed/held/blocked, and why.
   await session.report(call.name, call.args, {
     status: holdOrBlock,
     reason: decision.reason,
@@ -114,6 +124,10 @@ async function checkWithApproval(session, call, approverContext, originalPlanCap
 
   if (holdOrBlock !== 'hold' || !decision.delegationId) return decision;
 
+  // 4. HOLD / APPROVAL
+  // Our session.awaitApproval / approval flow represents the human-gated enforcement behavior 
+  // described by the SDK: a valid action can be held instead of automatically executed until 
+  // an authorized human approves it. High financial risk maps to a HOLD rather than a BLOCK.
   console.log('  Waiting for ArmorIQ dashboard approval...');
   const outcome = await session.awaitApproval(decision.delegationId, {
     timeout: APPROVAL_WAIT_SECONDS,
@@ -127,9 +141,6 @@ async function checkWithApproval(session, call, approverContext, originalPlanCap
     return decision;
   }
 
-  // Approval changes policy state, but we still re-run the exact signed-plan
-  // check before the local MCP call. This stays fail-closed if the token aged
-  // out while a human was reviewing the request.
   decision = await session.check(call.name, call.args, userEmail);
   decision = await handleDecision(decision);
   
@@ -146,6 +157,7 @@ async function runReadStep(session, goal, overrides, allowedTools, approverConte
   const decision = await checkWithApproval(session, call, approverContext, originalPlanCapture);
   if (!decision.allowed) return null;
 
+  // The MCP tool is executed ONLY after the ArmorIQ check allows it.
   const data = parseToolResult(await callTool(call.name, call.args));
   await session.report(call.name, call.args, data, { status: data.error ? 'failed' : 'success' });
   return data.error ? null : data;
@@ -156,6 +168,7 @@ async function runRefundStep(session, { action, order_id, amount, reasonForLog }
   const decision = await checkWithApproval(session, call, reasonForLog, originalPlanCapture);
   if (!decision.allowed) return { held: decision.action === 'hold', decision };
 
+  // The MCP tool is executed ONLY after the ArmorIQ check allows it.
   const data = parseToolResult(await callTool(call.name, call.args));
   await session.report(call.name, call.args, data, { status: data.error ? 'failed' : 'success' });
   if (data.error) throw new Error(`${call.name} failed: ${data.message ?? data.error}`);
@@ -167,8 +180,6 @@ async function processTicket(session, ticket) {
   console.log(`\n--- Ticket ${ticket.id} ---`);
   console.log(`  "${ticket.text.trim()}"`);
 
-  // Exactly one capture for this ticket: read order, read customer, refund.
-  // startPlan signs all three calls before any external action can run.
   await captureTicketPlan(session, ticket);
 
   const order = await runReadStep(
@@ -195,8 +206,6 @@ async function processTicket(session, ticket) {
   console.log(`  [RISK ASSESSMENT] Score: ${Math.round(riskScore)}/100. Factors: ${JSON.stringify(factors)}`);
   const reasonForLog = isElevated ? explainHold(order, customer, riskScore) : null;
 
-  // IMPORTANT: this remains the LLM-driven lookup result, not ticket.order_id.
-  // Any poisoned order id therefore reaches ArmorIQ's signed-plan check.
   const res = await runRefundStep(session, {
     action,
     order_id: order.id,
@@ -204,20 +213,17 @@ async function processTicket(session, ticket) {
     reasonForLog,
   }, ticket.originalPlanCapture);
 
-  // --- SAFE EXIT / FALLBACK MESSAGING ---
-  if (!res.decision) return; // Errored out before decision
+  if (!res.decision) return;
 
   if (res.decision.allowed) {
     console.log(`\n  💬 [Ticket Resolved] Message to customer: "Your refund of $${order.amount} has been successfully processed."`);
   } else if (res.decision.action === 'block') {
-    // Escalate internally, but send the customer a generic delay message
     console.log(`\n  💬 [Ticket Escalated] Message to customer: "We are experiencing a system error processing your request. Your ticket has been escalated to our support team for manual review."`);
     console.log(`  🚨 [Internal Note] System error: Intent mismatch detected. Automated resolution aborted.`);
   } else if (res.decision.action === 'hold') {
     if (res.decision.outcome === 'rejected') {
       console.log(`\n  💬 [Ticket Resolved] Message to customer: "Refund denied unfortunately. If you are not satisfied, please feel free to escalate to xyzcustomercare@gmail.com."`);
     } else {
-      // outcome is likely 'timeout' or pending
       console.log(`\n  💬 [Ticket Pending] Message to customer: "Your refund request requires further manual review. We will update you once a decision is made."`);
     }
   }
@@ -238,7 +244,6 @@ async function main() {
       mode: 'sdk',
       defaultMcpName: 'refund-desk',
       llm: 'gemini-3.6-flash',
-      // Must exceed the 30-minute dashboard approval poll plus retry time.
       validitySeconds: 2400,
     });
 

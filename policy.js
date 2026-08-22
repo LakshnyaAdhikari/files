@@ -1,11 +1,9 @@
-// This is the "dynamic, not hardcoded" piece.
-// Replaced fixed ceiling logic with a deterministic Refund Risk Score (0-100).
-//
-// The routing threshold is computed per-customer from real signal, and the LLM never sees
-// or decides this comparison -- it only ever sees the two possible tool names, never the logic
-// that picks between them. That's what keeps this un-jailbreakable: a prompt injection can talk
-// the agent into *wanting* to call apply_refund_standard, but it can't talk this function into
-// returning a different answer.
+// Computes a deterministic Refund Risk Score (0-100) per customer.
+// The LLM never sees or decides this risk score; it only sees the permitted tool names.
+// 
+// High financial risk maps to a HOLD (manual review) rather than a BLOCK (intent mismatch).
+// A high-risk refund is still a valid business intent, it just requires human authorization.
+// A BLOCK is strictly reserved for cryptographic intent violations (e.g. prompt injections).
 
 export function computeRiskScore(order, customer, refundAmount) {
   const amount = refundAmount || order.amount;
