@@ -209,7 +209,9 @@ async function processTicket(session, ticket) {
   if (res.decision.allowed) {
     console.log(`\n  💬 [Ticket Resolved] Message to customer: "Your refund of $${order.amount} has been successfully processed."`);
   } else if (res.decision.action === 'block') {
-    console.log(`\n  🚨 [Security Escalation] System error: Intent mismatch detected. Automated resolution aborted and escalated to internal security team.`);
+    // Escalate internally, but send the customer a generic delay message
+    console.log(`\n  💬 [Ticket Escalated] Message to customer: "We are experiencing a system error processing your request. Your ticket has been escalated to our support team for manual review."`);
+    console.log(`  🚨 [Internal Note] System error: Intent mismatch detected. Automated resolution aborted.`);
   } else if (res.decision.action === 'hold') {
     if (res.decision.outcome === 'rejected') {
       console.log(`\n  💬 [Ticket Resolved] Message to customer: "Refund denied unfortunately. If you are not satisfied, please feel free to escalate to xyzcustomercare@gmail.com."`);
