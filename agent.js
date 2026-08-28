@@ -115,12 +115,17 @@ async function checkWithApproval(session, call, approverContext, originalPlanCap
   // 6. OBSERVABILITY
   // We record the enforcement decision and relevant action information here so that the ArmorIQ 
   // platform/trace can show what the agent attempted, what was allowed/held/blocked, and why.
+  const isHold = holdOrBlock === 'hold';
   await session.report(call.name, call.args, {
     status: holdOrBlock,
     reason: decision.reason,
     approver_context: approverContext,
     delegation_id: decision.delegationId,
-  }, { status: 'failed', errorMessage: approverContext ?? decision.reason });
+  }, { 
+    status: isHold ? 'success' : 'failed', 
+    errorMessage: isHold ? undefined : (approverContext ?? decision.reason),
+    isDelegated: isHold
+  });
 
   // IMPORTANT: Force-flush the trace to the backend BEFORE we hang on awaitApproval.
   // Otherwise, the dashboard won't know we connected or generated a hold!
@@ -145,12 +150,8 @@ async function checkWithApproval(session, call, approverContext, originalPlanCap
     return decision;
   }
 
-  decision = await session.check(call.name, call.args, userEmail);
-  decision = await handleDecision(decision);
-  
-  if (!decision.allowed) {
-    console.log(`  [${decision.action.toUpperCase()}] approval did not authorize retry: ${decision.reason}`);
-  }
+  // The approval is final. Do not re-check the policy, or the backend will generate a new duplicate hold!
+  decision.allowed = true;
   return decision;
 }
 

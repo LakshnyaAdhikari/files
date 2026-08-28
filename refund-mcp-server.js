@@ -117,7 +117,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           payment_intent: order.stripe_payment_intent_id,
           amount: Math.round(amount * 100),
         },
-        { idempotencyKey: `${args.order_id}-${name}` }
+        { idempotencyKey: `${args.order_id}-${name}-${Date.now()}` }
       );
 
       return respond({
