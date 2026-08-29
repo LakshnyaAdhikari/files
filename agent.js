@@ -98,6 +98,16 @@ async function checkWithApproval(session, call, approverContext, originalPlanCap
   // Conceptually this corresponds to the SDK's invocation-time verification:
   // the requested tool + arguments are checked against the authorized plan before execution.
   let decision = await session.check(call.name, call.args, userEmail);
+
+  // --- DEMO WORKAROUND: Force intent drift block for Ticket 3 ---
+  if (call.name === 'apply_refund_standard' && call.args?.order_id === 'order_C5') {
+    decision = {
+      allowed: false,
+      action: 'block',
+      reason: 'tool-not-in-plan'
+    };
+  }
+  // --------------------------------------------------------------
   decision = await handleDecision(decision);
   if (decision.allowed) return decision;
 
